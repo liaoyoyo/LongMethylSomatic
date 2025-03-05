@@ -1,97 +1,47 @@
-#include "ArgumentParser.hpp"
-#include "VCFParser.hpp"
-#include "BAMProcessor.hpp"
-#include "MethylationAnalyzer.hpp"
-#include "ResultWriter.hpp"
+#include "ArgParser.hpp"
+#include "VCFHandler.hpp"
+#include "Analysis.hpp"
+#include "OutputHandler.hpp"
+#include "Utility.hpp"
 #include <iostream>
-#include <vector>
-#include <unordered_map>
-#include <set>
-#include <sstream>
-
-// 前述 aggregateReadInfo 函式與相關結構
-struct ReadInfoAggregated {
-    std::string readName;
-    std::set<int> mutatedPositions;
-    std::vector<int> allMethylationScores;
-};
-
-std::unordered_map<std::string, ReadInfoAggregated> aggregateReadInfo(const std::vector<std::vector<ReadInfo>> &allVariantReads);
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 int main(int argc, char* argv[]) {
     // 解析命令列參數
-    ArgumentParser &argParser = ArgumentParser::getInstance();
-    if (!argParser.parse(argc, argv)) {
-        return 1;
+    Args args = ArgParser::parse(argc, argv);
+#ifdef _OPENMP
+    omp_set_num_threads(args.maxThreads);
+#endif
+
+    // 總計時
+    Timer totalTimer;
+
+    // 解析 VCF 檔案，取得 somatic mutation 資訊
+    std::cout << "開始解析 VCF 檔案..." << std::endl;
+    Timer vcfTimer;
+    auto somaticSites = VCFHandler::parseSomaticSites(args.vcfFile);
+    std::cout << "VCF 解析耗時: " << vcfTimer.stop() << " 秒, 取得 " 
+              << somaticSites.size() << " 筆 mutation" << std::endl;
+
+    // 執行 BAM 分析：解析 CIGAR、MD 與 MM/ML 標籤，統計甲基化資訊
+    std::cout << "開始執行分析..." << std::endl;
+    Timer analysisTimer;
+    AnalysisResult analysisResult = Analysis::compute(somaticSites, args.tumorBam, args.normalBam, args.window);
+    std::cout << "分析耗時: " << analysisTimer.stop() << " 秒" << std::endl;
+
+    // 輸出結果
+    std::cout << "開始輸出結果..." << std::endl;
+    Timer outputTimer;
+    bool writeSomaticSuccess = OutputHandler::writeSomaticAnaly(analysisResult.somaticData, args.outputFolder);
+    bool writeMethylSuccess = OutputHandler::writeMethylAnaly(analysisResult.methylData, args.outputFolder);
+    if (!writeSomaticSuccess || !writeMethylSuccess) {
+        std::cerr << "錯誤：結果輸出失敗" << std::endl;
+        return EXIT_FAILURE;
     }
-    
-    // 載入 VCF 檔案與變異資訊
-    VCFParser vcfParser(argParser.getVcfFile());
-    if (!vcfParser.loadVariants()) {
-        std::cerr << "VCF 變異載入失敗，程式終止。\n";
-        return 1;
-    }
-    const auto &variants = vcfParser.getVariants();
-    if (variants.empty()) {
-        std::cerr << "VCF 無突變資訊，程式終止。\n";
-        return 1;
-    }
-    
-    // 開啟腫瘤 BAM 檔案
-    BAMProcessor tumorBamProcessor(argParser.getTumorBam());
-    if (!tumorBamProcessor.openBam()) {
-        return 1;
-    }
-    MethylationAnalyzer analyzer;
-    
-    // 儲存所有變異位點分析得到的 read 資訊
-    std::vector<std::vector<ReadInfo>> allVariantReads;
-    
-    std::cout << "開始處理變異...\n";
-    // 目標 1：針對每個突變位點，計算突變 reads 與非突變 reads 的甲基化比例
-    for (const auto &var : variants) {
-        auto reads = tumorBamProcessor.processVariant(var.chrom, var.pos, var.ref[0], var.alt[0], 50);
-        if (reads.empty()) {
-            std::cerr << "未找到任何 reads 於變異: " << var.chrom << ":" << var.pos << "\n";
-            continue; // 跳過此變異
-        }
-        allVariantReads.push_back(reads);
-        
-        double mutMethRate = analyzer.analyze(reads, true);
-        double nonMutMethRate = analyzer.analyze(reads, false);
-        
-        std::cout << "處理變異: " << var.chrom << ":" << var.pos << "\n";
-        std::cout << var.chrom << ":" << var.pos << " (" << var.ref << ">" << var.alt << ")\n";
-        std::cout << "突變 reads 甲基化比例: " << mutMethRate << "%\n";
-        std::cout << "非突變 reads 甲基化比例: " << nonMutMethRate << "%\n";
-    }
-    std::cout << "變異處理完成，開始聚合 reads...\n";
-    
-    // 目標 2：彙整同一 read 在不同突變位點的資訊
-    auto aggregatedReads = aggregateReadInfo(allVariantReads);
-    std::cout << "\nRead-level 統計資訊：\n";
-    std::vector<std::string> resultStrings;
-    for (const auto &entry : aggregatedReads) {
-        const auto &agg = entry.second;
-        double avgMeth = 0.0;
-        if (!agg.allMethylationScores.empty()) {
-            double sum = 0;
-            for (auto score : agg.allMethylationScores) sum += score;
-            avgMeth = sum / agg.allMethylationScores.size();
-        }
-        std::ostringstream oss;
-        oss << "Read: " << agg.readName
-            << ", 突變位點數: " << agg.mutatedPositions.size()
-            << ", 平均甲基化分數: " << avgMeth;
-        resultStrings.push_back(oss.str());
-    }
-    
-    // 在計算完所有變異後，將結果寫入文件
-    ResultWriter writer;
-    if (!writer.write(argParser.getOutputFile(), resultStrings)) {
-        std::cerr << "結果輸出失敗\n";
-        return 1;
-    }
-    
-    return 0;
-} 
+    std::cout << "輸出耗時: " << outputTimer.stop() << " 秒" << std::endl;
+
+    std::cout << "總執行時間: " << totalTimer.stop() << " 秒" << std::endl;
+    return EXIT_SUCCESS;
+}

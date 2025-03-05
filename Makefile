@@ -1,31 +1,19 @@
-# Makefile for VCFParser and somatic_methylation_analyzer
-
-# 編譯器
 CXX = g++
-# 編譯選項
-CXXFLAGS = -std=c++11 -fopenmp -g
-# 連結庫
-LIBS = -lhts
-# 目標可執行檔
-TARGET = somatic_methylation_analyzer
-# 所有的源碼檔案
-SOURCES = $(wildcard *.cpp)
-# 生成的物件檔案
-OBJECTS = $(SOURCES:.cpp=.o)
+CXXFLAGS = -std=c++11 -g -O2 -Wall -fopenmp -I/big8_disk/liaoyoyo2001/test1/htslib/include
+LDFLAGS = -L/big8_disk/liaoyoyo2001/test1/htslib/lib
+LIBS = -lhts -llzma -lz -lbz2 -ldeflate -lcurl -lssl -lcrypto -lpthread -lm 
 
-# 預設目標
+SRCS = main.cpp ArgParser.cpp VCFHandler.cpp Analysis.cpp OutputHandler.cpp Utility.cpp
+OBJS = $(SRCS:.cpp=.o)
+TARGET = LongMethylSomatic
+
 all: $(TARGET)
 
-# 編譯可執行檔
-$(TARGET): $(OBJECTS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-# 編譯源碼檔案
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# 清理生成的檔案
 clean:
-	rm -f $(OBJECTS) $(TARGET)
-
-.PHONY: all clean 
+	rm -f $(OBJS) $(TARGET)
